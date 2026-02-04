@@ -1,6 +1,6 @@
-streamlit==1.41.1
-pandas==2.2.3
-pdfplumber==0.11.4
-pillow==10.4.0
-pytesseract==0.3.13
-
+streamlit
+pandas
+openpyxl
+pdfplumber
+pytesseract
+Pillow
