@@ -1,5 +1,5 @@
-import io
 import re
+import io
 from typing import Dict, Optional, Tuple
 
 import pandas as pd
@@ -7,36 +7,28 @@ import streamlit as st
 import pdfplumber
 from PIL import Image
 import pytesseract
-from pdfminer.pdfparser import PDFSyntaxError
+
 
 # =========================
-# PAGE CONFIG
+# STREAMLIT SAFETY GUARD
 # =========================
-st.set_page_config(
-    page_title="Remittance Cleaner — Private Beta",
-    layout="wide",
-)
 
-st.title("Remittance Cleaner — MVP (Private Beta)")
-st.caption("Statement = Expected • Remittance = Paid • Difference calculated")
+if "ready" not in st.session_state:
+    st.session_state.ready = False
+
 
 # =========================
-# UTILITIES
+# BASIC UTILITIES
 # =========================
 
 def parse_money(text: str) -> Optional[float]:
     if not text:
         return None
-    text = (
-        text.replace("£", "")
-        .replace("€", "")
-        .replace("$", "")
-        .replace(",", "")
-        .strip()
-    )
+    text = text.replace("£", "").replace("€", "").replace("$", "")
+    text = text.replace(",", "").strip()
     try:
         return float(text)
-    except ValueError:
+    except:
         return None
 
 
@@ -54,57 +46,37 @@ def find_invoices(text: str):
 # SAFE FILE EXTRACTION
 # =========================
 
-def extract_text_from_pdf(data: bytes) -> str:
-    try:
-        pages = []
-        with pdfplumber.open(io.BytesIO(data)) as pdf:
-            for page in pdf.pages:
-                pages.append(page.extract_text() or "")
-        return "\n".join(pages).strip()
-    except PDFSyntaxError:
-        return ""
-    except Exception:
-        return ""
-
-
-def extract_text_from_image(data: bytes) -> str:
-    try:
-        img = Image.open(io.BytesIO(data))
-        return pytesseract.image_to_string(img, config="--oem 3 --psm 6")
-    except Exception:
-        return ""
-
-
-def extract_upload(upload) -> Tuple[str, float, bool]:
+def extract_text(upload) -> Tuple[str, bool]:
     """
-    Returns (text, confidence, success)
+    Returns (text, success)
     """
     if upload is None:
-        return "", 0.0, False
-
-    data = upload.read()
-    name = upload.name.lower()
-
-    if name.endswith(".pdf"):
-        text = extract_text_from_pdf(data)
-        return text, 0.85 if text else 0.0, bool(text)
-
-    if name.endswith((".png", ".jpg", ".jpeg")):
-        text = extract_text_from_image(data)
-        return text, 0.6 if text else 0.0, bool(text)
-
-    if name.endswith(".xlsx"):
-        try:
-            df = pd.read_excel(io.BytesIO(data))
-            return df.to_string(), 0.95, True
-        except Exception:
-            return "", 0.0, False
+        return "", False
 
     try:
-        text = data.decode("utf-8", errors="ignore")
-        return text, 0.9, bool(text.strip())
+        data = upload.read()
+        name = upload.name.lower()
+
+        if name.endswith(".pdf"):
+            text = []
+            with pdfplumber.open(io.BytesIO(data)) as pdf:
+                for page in pdf.pages:
+                    page_text = page.extract_text()
+                    if page_text:
+                        text.append(page_text)
+            return "\n".join(text), True
+
+        if name.endswith((".png", ".jpg", ".jpeg")):
+            img = Image.open(io.BytesIO(data))
+            return pytesseract.image_to_string(img, config="--oem 3 --psm 6"), True
+
+        if name.endswith(".txt"):
+            return data.decode("utf-8", errors="ignore"), True
+
     except Exception:
-        return "", 0.0, False
+        return "", False
+
+    return "", False
 
 
 # =========================
@@ -113,35 +85,41 @@ def extract_upload(upload) -> Tuple[str, float, bool]:
 
 def parse_statement(text: str) -> Dict[str, float]:
     result = {}
+
     for line in text.splitlines():
         invoices = find_invoices(line)
         amounts = re.findall(r"\d+\.\d{2}", line)
+
         if invoices and amounts:
             expected = parse_money(amounts[-1])
             for inv in invoices:
                 result[inv] = expected
+
     return result
 
 
 def parse_remittance(text: str) -> Dict[str, float]:
     result = {}
+
     for line in text.splitlines():
         invoices = find_invoices(line)
         amounts = re.findall(r"\d+\.\d{2}", line)
+
         if invoices and amounts:
             paid = parse_money(amounts[-1])
             for inv in invoices:
-                result[inv] = round(result.get(inv, 0.0) + paid, 2)
+                result[inv] = round(result.get(inv, 0) + paid, 2)
+
     return result
 
 
 # =========================
-# RECONCILIATION (NO REMAINING BALANCE)
+# RECONCILIATION
 # =========================
 
-def reconcile(statement: Dict[str, float], remittance: Dict[str, float], confidence: float) -> pd.DataFrame:
+def reconcile(statement: Dict[str, float], remittance: Dict[str, float]) -> pd.DataFrame:
     rows = []
-    invoices = sorted(set(statement) | set(remittance))
+    invoices = sorted(set(statement.keys()) | set(remittance.keys()))
 
     for inv in invoices:
         expected = statement.get(inv)
@@ -153,18 +131,18 @@ def reconcile(statement: Dict[str, float], remittance: Dict[str, float], confide
                 "Expected_Total": None,
                 "Paid_Total": paid,
                 "Difference": None,
-                "Status": "MISSING FROM STATEMENT",
-                "Confidence": confidence,
+                "Status": "MISSING FROM STATEMENT"
             })
             continue
 
-        diff = round(paid - expected, 2)
+        difference = round(paid - expected, 2)
 
         if paid == 0:
             status = "NOT PAID"
-        elif abs(diff) < 0.01:
+        elif abs(difference) < 0.01:
             status = "FULLY PAID"
-        elif diff < 0:
+            difference = 0.0
+        elif difference < 0:
             status = "UNDERPAID"
         else:
             status = "OVERPAID"
@@ -173,9 +151,8 @@ def reconcile(statement: Dict[str, float], remittance: Dict[str, float], confide
             "Invoice_Number": inv,
             "Expected_Total": expected,
             "Paid_Total": paid,
-            "Difference": diff,
-            "Status": status,
-            "Confidence": confidence,
+            "Difference": difference,
+            "Status": status
         })
 
     return pd.DataFrame(rows)
@@ -185,62 +162,63 @@ def reconcile(statement: Dict[str, float], remittance: Dict[str, float], confide
 # UI
 # =========================
 
+st.set_page_config(page_title="Remittance Cleaner — MVP", layout="wide")
+st.title("Remittance Cleaner — MVP")
+st.caption("Statement = Expected | Remittance = Paid | Difference calculated")
+
 left, right = st.columns(2)
 
 with left:
     st.subheader("Remittance")
-    remit_text = st.text_area("Paste remittance text", height=180)
-    st.markdown("**— OR —**")
-    remit_file = st.file_uploader("Upload remittance file", type=["pdf", "png", "jpg", "xlsx"])
-    st.caption("Files processed in memory only. Nothing is stored.")
+    remit_text = st.text_area("Copy & paste remittance text", height=200)
+    st.markdown("**or**")
+    remit_file = st.file_uploader("Upload remittance file")
 
 with right:
     st.subheader("Statement of Account")
-    stmt_text = st.text_area("Paste statement text", height=180)
-    st.markdown("**— OR —**")
-    stmt_file = st.file_uploader("Upload statement file", type=["pdf", "png", "jpg", "xlsx"])
-    st.caption("Files processed in memory only. Nothing is stored.")
+    stmt_text = st.text_area("Copy & paste statement text", height=200)
+    st.markdown("**or**")
+    stmt_file = st.file_uploader("Upload statement file")
 
 st.divider()
 
-# =========================
-# RUN
-# =========================
-
 if st.button("Run Reconciliation"):
-    stmt_file_text, stmt_conf, stmt_ok = extract_upload(stmt_file)
-    remit_file_text, remit_conf, remit_ok = extract_upload(remit_file)
+    st.session_state.ready = True
 
-    if stmt_file and not stmt_ok:
-        st.warning("⚠️ Could not reliably read the statement file. Try copy & paste.")
 
-    if remit_file and not remit_ok:
-        st.warning("⚠️ Could not reliably read the remittance file. Try copy & paste.")
+# =========================
+# PROCESS (SAFE)
+# =========================
 
-    stmt_raw = stmt_file_text + "\n" + stmt_text
-    remit_raw = remit_file_text + "\n" + remit_text
+if st.session_state.ready:
 
-    if not stmt_raw.strip() or not remit_raw.strip():
-        st.error("Statement and remittance are required.")
-        st.stop()
+    stmt_file_text, stmt_ok = extract_text(stmt_file)
+    remit_file_text, remit_ok = extract_text(remit_file)
+
+    stmt_raw = (stmt_file_text if stmt_ok else "") + "\n" + stmt_text
+    remit_raw = (remit_file_text if remit_ok else "") + "\n" + remit_text
 
     stmt_map = parse_statement(stmt_raw)
     remit_map = parse_remittance(remit_raw)
 
     if not stmt_map or not remit_map:
-        st.error("No matching invoices found. Copy & paste works best.")
+        st.warning(
+            "⚠️ We couldn’t reliably read one of the inputs.\n\n"
+            "For best results, **copy & paste the text directly**."
+        )
         st.stop()
 
-    confidence = round(min(stmt_conf or 0.85, remit_conf or 0.85), 2)
+    df = reconcile(stmt_map, remit_map)
 
-    df = reconcile(stmt_map, remit_map, confidence)
+    if df.empty:
+        st.warning("No matching invoices found between statement and remittance.")
+    else:
+        st.success("Reconciliation complete")
+        st.dataframe(df, use_container_width=True)
 
-    st.success("Reconciliation complete")
-    st.dataframe(df, use_container_width=True)
-
-    st.download_button(
-        "Download CSV",
-        df.to_csv(index=False).encode("utf-8"),
-        "reconciliation_output.csv",
-        "text/csv",
-    )
+        st.download_button(
+            "Download CSV",
+            df.to_csv(index=False).encode("utf-8"),
+            "reconciliation_output.csv",
+            "text/csv"
+        )
