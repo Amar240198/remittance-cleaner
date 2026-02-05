@@ -1,16 +1,31 @@
+import re
+from typing import Dict, Optional
+
 import pandas as pd
 import streamlit as st
+
+
+# =========================
+# FORCE UI RENDER FIRST
+# =========================
+st.set_page_config(page_title="Remittance Cleaner — MVP", layout="wide")
+st.title("Remittance Cleaner — MVP")
+st.caption(
+    "Paste statement and remittance text below. "
+    "Statement Balance comes from the statement. Difference = Paid − Statement Balance."
+)
+
+# If anything below fails, UI will still render
+st.write("")  # defensive render anchor
 
 
 # =========================
 # UTILITIES
 # =========================
 def parse_money(x: str) -> Optional[float]:
-    if x is None:
-        return None
-    s = str(x).replace("£", "").replace("€", "").replace("$", "")
-    s = s.replace(",", "").strip()
     try:
+        s = str(x).replace("£", "").replace("€", "").replace("$", "")
+        s = s.replace(",", "").strip()
         return float(s)
     except Exception:
         return None
@@ -22,17 +37,16 @@ def normalize_invoice(inv: str) -> str:
 
 
 def find_invoices(text: str):
-    raw = re.findall(r"\b(?:INV)?0*\d{5,12}\b", text.upper())
-    return [normalize_invoice(r) for r in raw]
+    return [
+        normalize_invoice(x)
+        for x in re.findall(r"\b(?:INV)?0*\d{5,12}\b", text.upper())
+    ]
 
 
 # =========================
-# PARSERS (TEXT ONLY)
+# PARSERS
 # =========================
 def parse_statement(text: str) -> Dict[str, float]:
-    """
-    Invoice -> Statement Balance (expected total from statement)
-    """
     result = {}
     for line in text.splitlines():
         invoices = find_invoices(line)
@@ -45,9 +59,6 @@ def parse_statement(text: str) -> Dict[str, float]:
 
 
 def parse_remittance(text: str) -> Dict[str, float]:
-    """
-    Invoice -> Paid Total (from remittance)
-    """
     result = {}
     for line in text.splitlines():
         invoices = find_invoices(line)
@@ -104,4 +115,51 @@ def reconcile(statement: Dict[str, float], remittance: Dict[str, float]) -> pd.D
 
 
 # =========================
-# STRE
+# UI INPUTS
+# =========================
+left, right = st.columns(2)
+
+with left:
+    st.subheader("Remittance (Paste Text)")
+    remit_text = st.text_area("Paste remittance text", height=220)
+
+with right:
+    st.subheader("Statement of Account (Paste Text)")
+    stmt_text = st.text_area("Paste statement text", height=220)
+
+st.divider()
+
+# =========================
+# ACTION
+# =========================
+if st.button("Run Reconciliation", type="primary"):
+    try:
+        if not remit_text.strip() or not stmt_text.strip():
+            st.error("Both remittance and statement text are required.")
+            st.stop()
+
+        stmt_map = parse_statement(stmt_text)
+        remit_map = parse_remittance(remit_text)
+
+        if not stmt_map or not remit_map:
+            st.warning(
+                "⚠️ Unable to extract invoices or balances.\n\n"
+                "Ensure invoice numbers and amounts appear on the same lines."
+            )
+            st.stop()
+
+        df = reconcile(stmt_map, remit_map)
+
+        st.success("Reconciliation complete")
+        st.dataframe(df, use_container_width=True)
+
+        st.download_button(
+            "Download CSV",
+            df.to_csv(index=False).encode("utf-8"),
+            "reconciliation_output.csv",
+            "text/csv"
+        )
+
+    except Exception as e:
+        st.error("This app encountered an unexpected error.")
+        st.code(str(e))
