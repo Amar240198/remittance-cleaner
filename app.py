@@ -43,7 +43,7 @@ def find_invoices(text: str):
 # =========================
 # PDF EXTRACTION (CLOUD SAFE)
 # =========================
-def extract_pdf_text_safe(file_bytes: bytes) -> Tuple[str, float]:
+def extract_pdf_text_safe(file_bytes: bytes) -> str:
     deadline = time.time() + MAX_PARSE_SECONDS
 
     # --- Attempt 1: pypdf ---
@@ -56,7 +56,7 @@ def extract_pdf_text_safe(file_bytes: bytes) -> Tuple[str, float]:
             parts.append(page.extract_text() or "")
         text = "\n".join(parts).strip()
         if len(text) >= MIN_TEXT_LEN_OK:
-            return text, 0.85
+            return text
     except Exception:
         pass
 
@@ -70,44 +70,40 @@ def extract_pdf_text_safe(file_bytes: bytes) -> Tuple[str, float]:
                 parts.append(page.extract_text() or "")
         text = "\n".join(parts).strip()
         if len(text) >= MIN_TEXT_LEN_OK:
-            return text, 0.80
+            return text
     except Exception:
         pass
 
-    return "", 0.0
+    return ""
 
 
 # =========================
 # EXCEL EXTRACTION
 # =========================
-def extract_excel_safe(file_bytes: bytes) -> Tuple[pd.DataFrame, float]:
-    df = pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
-    return df, 0.95
+def extract_excel_safe(file_bytes: bytes) -> pd.DataFrame:
+    return pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
 
 
 # =========================
 # GENERIC UPLOAD HANDLER
 # =========================
-def extract_upload(upload, label: str) -> Tuple[Union[str, pd.DataFrame], float, str]:
+def extract_upload(upload) -> Tuple[Union[str, pd.DataFrame], str]:
     if upload is None:
-        return "", 0.0, "none"
+        return "", "none"
 
     name = upload.name.lower()
     data = upload.read()
 
     if name.endswith(".xlsx"):
-        df, conf = extract_excel_safe(data)
-        return df, conf, "excel"
+        return extract_excel_safe(data), "excel"
 
     if name.endswith(".pdf"):
-        text, conf = extract_pdf_text_safe(data)
-        return text, conf, "pdf"
+        return extract_pdf_text_safe(data), "pdf"
 
     try:
-        text = data.decode("utf-8", errors="ignore")
-        return text, 0.8, "text"
+        return data.decode("utf-8", errors="ignore"), "text"
     except Exception:
-        return "", 0.0, "unknown"
+        return "", "unknown"
 
 
 # =========================
@@ -152,7 +148,7 @@ def parse_excel(df: pd.DataFrame) -> Dict[str, float]:
 # =========================
 # RECONCILIATION
 # =========================
-def reconcile(stmt_map, remit_map, confidence):
+def reconcile(stmt_map, remit_map):
     rows = []
     invoices = sorted(set(stmt_map) | set(remit_map))
 
@@ -167,7 +163,6 @@ def reconcile(stmt_map, remit_map, confidence):
                 "Paid_Total": paid,
                 "Difference": None,
                 "Status": "MISSING FROM STATEMENT",
-                "Confidence": confidence,
             })
             continue
 
@@ -189,7 +184,6 @@ def reconcile(stmt_map, remit_map, confidence):
             "Paid_Total": paid,
             "Difference": diff,
             "Status": status,
-            "Confidence": confidence,
         })
 
     return pd.DataFrame(rows)
@@ -220,8 +214,8 @@ st.divider()
 
 if st.button("Run Reconciliation", type="primary"):
     try:
-        stmt_content, stmt_conf, stmt_type = extract_upload(stmt_file, "Statement")
-        remit_content, remit_conf, remit_type = extract_upload(remit_file, "Remittance")
+        stmt_content, stmt_type = extract_upload(stmt_file)
+        remit_content, remit_type = extract_upload(remit_file)
 
         if isinstance(stmt_content, pd.DataFrame):
             stmt_map = parse_excel(stmt_content)
@@ -240,8 +234,7 @@ if st.button("Run Reconciliation", type="primary"):
             )
             st.stop()
 
-        confidence = round(min(stmt_conf, remit_conf), 2)
-        df = reconcile(stmt_map, remit_map, confidence)
+        df = reconcile(stmt_map, remit_map)
 
         st.success("Reconciliation complete")
         st.dataframe(df, use_container_width=True)
