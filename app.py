@@ -1,19 +1,8 @@
-import io
 import re
-import time
-from typing import Dict, Optional, Tuple, Union
+from typing import Dict, Optional
 
 import pandas as pd
 import streamlit as st
-import pdfplumber
-from pypdf import PdfReader
-
-
-# =========================
-# CONFIG / SAFETY LIMITS
-# =========================
-MAX_PARSE_SECONDS = 15
-MIN_TEXT_LEN_OK = 150
 
 
 # =========================
@@ -41,75 +30,12 @@ def find_invoices(text: str):
 
 
 # =========================
-# PDF EXTRACTION (CLOUD SAFE)
-# =========================
-def extract_pdf_text_safe(file_bytes: bytes) -> str:
-    deadline = time.time() + MAX_PARSE_SECONDS
-
-    # --- Attempt 1: pypdf ---
-    try:
-        reader = PdfReader(io.BytesIO(file_bytes))
-        parts = []
-        for page in reader.pages:
-            if time.time() > deadline:
-                raise TimeoutError
-            parts.append(page.extract_text() or "")
-        text = "\n".join(parts).strip()
-        if len(text) >= MIN_TEXT_LEN_OK:
-            return text
-    except Exception:
-        pass
-
-    # --- Attempt 2: pdfplumber ---
-    try:
-        parts = []
-        with pdfplumber.open(io.BytesIO(file_bytes)) as pdf:
-            for page in pdf.pages:
-                if time.time() > deadline:
-                    raise TimeoutError
-                parts.append(page.extract_text() or "")
-        text = "\n".join(parts).strip()
-        if len(text) >= MIN_TEXT_LEN_OK:
-            return text
-    except Exception:
-        pass
-
-    return ""
-
-
-# =========================
-# EXCEL EXTRACTION
-# =========================
-def extract_excel_safe(file_bytes: bytes) -> pd.DataFrame:
-    return pd.read_excel(io.BytesIO(file_bytes), engine="openpyxl")
-
-
-# =========================
-# GENERIC UPLOAD HANDLER
-# =========================
-def extract_upload(upload) -> Tuple[Union[str, pd.DataFrame], str]:
-    if upload is None:
-        return "", "none"
-
-    name = upload.name.lower()
-    data = upload.read()
-
-    if name.endswith(".xlsx"):
-        return extract_excel_safe(data), "excel"
-
-    if name.endswith(".pdf"):
-        return extract_pdf_text_safe(data), "pdf"
-
-    try:
-        return data.decode("utf-8", errors="ignore"), "text"
-    except Exception:
-        return "", "unknown"
-
-
-# =========================
-# PARSERS
+# PARSERS (TEXT ONLY)
 # =========================
 def parse_statement(text: str) -> Dict[str, float]:
+    """
+    Invoice -> Expected Total (from statement)
+    """
     result = {}
     for line in text.splitlines():
         invoices = find_invoices(line)
@@ -122,6 +48,9 @@ def parse_statement(text: str) -> Dict[str, float]:
 
 
 def parse_remittance(text: str) -> Dict[str, float]:
+    """
+    Invoice -> Paid Total (from remittance)
+    """
     result = {}
     for line in text.splitlines():
         invoices = find_invoices(line)
@@ -133,28 +62,16 @@ def parse_remittance(text: str) -> Dict[str, float]:
     return result
 
 
-def parse_excel(df: pd.DataFrame) -> Dict[str, float]:
-    result = {}
-    for _, row in df.iterrows():
-        row_text = " ".join(str(x) for x in row.values)
-        invoices = find_invoices(row_text)
-        numbers = [parse_money(x) for x in row.values if parse_money(x) is not None]
-        if invoices and numbers:
-            for inv in invoices:
-                result[inv] = numbers[-1]
-    return result
-
-
 # =========================
 # RECONCILIATION
 # =========================
-def reconcile(stmt_map, remit_map):
+def reconcile(statement: Dict[str, float], remittance: Dict[str, float]) -> pd.DataFrame:
     rows = []
-    invoices = sorted(set(stmt_map) | set(remit_map))
+    invoices = sorted(set(statement) | set(remittance))
 
     for inv in invoices:
-        expected = stmt_map.get(inv)
-        paid = remit_map.get(inv, 0.0)
+        expected = statement.get(inv)
+        paid = remittance.get(inv, 0.0)
 
         if expected is None:
             rows.append({
@@ -190,47 +107,48 @@ def reconcile(stmt_map, remit_map):
 
 
 # =========================
-# STREAMLIT UI
+# STREAMLIT UI (PASTE ONLY)
 # =========================
 st.set_page_config(page_title="Remittance Cleaner — MVP", layout="wide")
 st.title("Remittance Cleaner — MVP")
-st.caption("Expected comes from Statement | Paid comes from Remittance | Difference = Paid − Expected")
+st.caption(
+    "Paste statement and remittance text below. "
+    "This MVP processes text only to ensure maximum reliability."
+)
 
 left, right = st.columns(2)
 
 with left:
-    st.subheader("Remittance")
-    remit_text = st.text_area("Paste remittance text", height=180)
-    st.markdown("**or**")
-    remit_file = st.file_uploader("Upload remittance file (PDF / XLSX / TXT)")
+    st.subheader("Remittance (Paste Text)")
+    remit_text = st.text_area(
+        "Paste remittance email or text",
+        height=220,
+        placeholder="Paste remittance text here…"
+    )
 
 with right:
-    st.subheader("Statement of Account")
-    stmt_text = st.text_area("Paste statement text", height=180)
-    st.markdown("**or**")
-    stmt_file = st.file_uploader("Upload statement file (PDF / XLSX / TXT)")
+    st.subheader("Statement of Account (Paste Text)")
+    stmt_text = st.text_area(
+        "Paste statement text",
+        height=220,
+        placeholder="Paste statement text here…"
+    )
 
 st.divider()
 
 if st.button("Run Reconciliation", type="primary"):
+    if not remit_text.strip() or not stmt_text.strip():
+        st.error("Both remittance and statement text are required.")
+        st.stop()
+
     try:
-        stmt_content, stmt_type = extract_upload(stmt_file)
-        remit_content, remit_type = extract_upload(remit_file)
-
-        if isinstance(stmt_content, pd.DataFrame):
-            stmt_map = parse_excel(stmt_content)
-        else:
-            stmt_map = parse_statement((stmt_content or "") + "\n" + (stmt_text or ""))
-
-        if isinstance(remit_content, pd.DataFrame):
-            remit_map = parse_excel(remit_content)
-        else:
-            remit_map = parse_remittance((remit_content or "") + "\n" + (remit_text or ""))
+        stmt_map = parse_statement(stmt_text)
+        remit_map = parse_remittance(remit_text)
 
         if not stmt_map or not remit_map:
             st.warning(
-                "⚠️ We couldn’t reliably read one of the inputs.\n\n"
-                "If the PDF is scanned/image-only, please copy & paste the text."
+                "⚠️ We couldn’t reliably extract invoices and amounts.\n\n"
+                "Make sure invoice numbers and amounts appear on the same lines."
             )
             st.stop()
 
@@ -246,14 +164,8 @@ if st.button("Run Reconciliation", type="primary"):
             "text/csv"
         )
 
-    except TimeoutError:
-        st.error(
-            "⏱️ Processing timed out.\n\n"
-            "Try smaller files or copy/paste instead."
-        )
-
     except Exception:
         st.error(
             "This app encountered an error while parsing.\n\n"
-            "Try copy/paste instead of upload."
+            "Please check the pasted text and try again."
         )
